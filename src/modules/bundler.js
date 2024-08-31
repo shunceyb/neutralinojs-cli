@@ -1,11 +1,14 @@
 const fse = require('fs-extra');
 const fs = require('fs');
-const archiver = require('archiver');
+const zl = require('zip-lib');
 const asar = require('@electron/asar');
 const config = require('./config');
 const constants = require('../constants');
 const frontendlib = require('./frontendlib');
+const hostproject = require('./hostproject');
 const utils = require('../utils');
+const {patchWindowsExecutable} = require('./exepatch');
+const path = require('path');
 
 async function createAsarFile() {
     utils.log(`Generating ${constants.files.resourceFile}...`);
@@ -50,17 +53,26 @@ async function createAsarFile() {
         await fse.copy(`./${icon}`, `.tmp/${icon}`, {overwrite: true});
     }
 
-    await asar.createPackage('.tmp', `${buildDir}/${binaryName}/${constants.files.resourceFile}`);
+    let resourceFile = constants.files.resourceFile;
+    if(hostproject.hasHostProject()) {
+        resourceFile = `bin/${resourceFile}`;
+    }
+    await asar.createPackage('.tmp', `${buildDir}/${binaryName}/${resourceFile}`);
 }
 
 module.exports.bundleApp = async (isRelease, copyStorage) => {
     let configObj = config.get();
     let binaryName = configObj.cli.binaryName;
     const buildDir = configObj.cli.distributionPath ? utils.trimPath(configObj.cli.distributionPath) : 'dist';
+    const hostProjectConfig = configObj.cli ? configObj.cli.hostProject : undefined;
 
     try {
         if (frontendlib.containsFrontendLibApp()) {
             await frontendlib.runCommand('buildCommand');
+        }
+
+        if(hostproject.hasHostProject()) {
+            await hostproject.runCommand('buildCommand');
         }
 
         await createAsarFile();
@@ -69,11 +81,28 @@ module.exports.bundleApp = async (isRelease, copyStorage) => {
         for (let platform in constants.files.binaries) {
             for (let arch in constants.files.binaries[platform]) {
                 let originalBinaryFile = constants.files.binaries[platform][arch];
-                let destinationBinaryFile = originalBinaryFile.replace('neutralino', binaryName);
+                let destinationBinaryFile = hostproject.hasHostProject() ? `bin/${originalBinaryFile}` : originalBinaryFile.replace('neutralino', binaryName);
                 if (fse.existsSync(`bin/${originalBinaryFile}`)) {
                     fse.copySync(`bin/${originalBinaryFile}`, `${buildDir}/${binaryName}/${destinationBinaryFile}`);
                 }
             }
+        }
+
+        utils.log('Patching windows executables...');
+        try {
+            await Promise.all(Object.keys(constants.files.binaries.win32).map(async (arch) => {
+                const origBinaryName = constants.files.binaries.win32[arch];
+                const filepath = hostproject.hasHostProject() ? `bin/${origBinaryName}` : origBinaryName.replace('neutralino', binaryName);
+                const winPath = `${buildDir}/${binaryName}/${filepath}`;
+                if (await fse.exists(winPath)) {
+                    await patchWindowsExecutable(winPath);
+                }
+            }))
+        }
+        catch (err) {
+            console.error(err);
+            utils.error('Could not patch windows executable');
+            process.exit(1);
         }
 
         for (let dependency of constants.files.dependencies) {
@@ -91,13 +120,14 @@ module.exports.bundleApp = async (isRelease, copyStorage) => {
             }
         }
 
+        if(hostproject.hasHostProject() && hostProjectConfig && hostProjectConfig.buildPath){
+            utils.log('Copying host project files...');
+            fse.copySync(utils.trimPath(hostProjectConfig.buildPath), `${buildDir}/${binaryName}/`);
+        }
+
         if (isRelease) {
             utils.log('Making app bundle ZIP file...');
-            let output = fs.createWriteStream(`${buildDir}/${binaryName}-release.zip`);
-            let archive = archiver('zip', { zlib: { level: 9 } });
-            archive.pipe(output);
-            archive.directory(`${buildDir}/${binaryName}`, false);
-            await archive.finalize();
+            await zl.archiveFolder(`${buildDir}/${binaryName}`, `${buildDir}/${binaryName}-release.zip`);
         }
         utils.clearDirectory('.tmp');
     }

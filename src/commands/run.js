@@ -4,6 +4,7 @@ const runner = require('../modules/runner');
 const utils = require('../utils');
 const config = require('../modules/config');
 const frontendlib = require('../modules/frontendlib');
+const hostproject = require('../modules/hostproject');
 
 module.exports.register = (program) => {
     program
@@ -14,6 +15,11 @@ module.exports.register = (program) => {
         .action(async (command) => {
             utils.checkCurrentProject();
             let configObj = config.get();
+
+            if(hostproject.hasHostProject()) {
+                return hostproject.runCommand('devCommand');
+            }
+
             let containsFrontendLibApp = frontendlib.containsFrontendLibApp();
             let argsOpt = "";
 
